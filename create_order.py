@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
 Falabella FACL Staging - Order Creation Automation
-Usage: python3 create_order.py <SKU_or_URL> [--headed] [--slow N]
 
-Examples:
-    python3 create_order.py 7144554
+First time setup:
+    python3 create_order.py --login          # Opens browser for manual Cloudflare + Falabella login
+                                              # Saves session for future automated runs
+
+Create orders:
+    python3 create_order.py 7144554          # Headless (after login session saved)
     python3 create_order.py 881333143 --headed
     python3 create_order.py https://staging.falabella.com/falabella-cl/product/7144554/Samsung-Galaxy-Buds/7144554
 
 Note: Must run from a machine with access to staging.falabella.com (corporate VPN).
-      Use --headed for first run to watch the flow and debug if needed.
 """
 
 import sys
@@ -41,13 +43,24 @@ STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auth_stat
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Create a test order on Falabella FACL staging")
-    parser.add_argument("sku_or_url", help="Product SKU (e.g. 7144554) or full product URL")
-    parser.add_argument("--headed", action="store_true", help="Run with visible browser (recommended for first run)")
-    parser.add_argument("--slow", type=int, default=0, help="Slow down actions by N ms (useful for debugging)")
-    parser.add_argument("--clear-cart", action="store_true", help="Clear cart before adding new product")
-    parser.add_argument("--account", type=str, default=EMAIL, help="Override test account email")
-    parser.add_argument("--password", type=str, default=PASSWORD, help="Override test account password")
-    return parser.parse_args()
+    parser.add_argument("sku_or_url", nargs="?", default=None,
+                        help="Product SKU (e.g. 7144554) or full product URL")
+    parser.add_argument("--login", action="store_true",
+                        help="Interactive login mode: opens browser for manual Cloudflare + Falabella auth, saves session")
+    parser.add_argument("--headed", action="store_true",
+                        help="Run with visible browser (recommended for first run)")
+    parser.add_argument("--slow", type=int, default=0,
+                        help="Slow down actions by N ms (useful for debugging)")
+    parser.add_argument("--clear-cart", action="store_true",
+                        help="Clear cart before adding new product")
+    parser.add_argument("--account", type=str, default=EMAIL,
+                        help="Override test account email")
+    parser.add_argument("--password", type=str, default=PASSWORD,
+                        help="Override test account password")
+    args = parser.parse_args()
+    if not args.login and not args.sku_or_url:
+        parser.error("Please provide a SKU/URL, or use --login to set up authentication first")
+    return args
 
 
 def sku_to_url(sku_or_url):
@@ -90,33 +103,82 @@ def save_screenshot(page, name):
     log(f"  Screenshot saved: {name}.png")
 
 
-def login(page, email, password):
-    """Login to Falabella staging with test account."""
-    log("Step 1: Logging in...")
+def interactive_login(context, page):
+    """Interactive login: user manually completes Cloudflare Access + Falabella login."""
+    log("=== INTERACTIVE LOGIN MODE ===")
+    log("")
+    log("A browser window will open. Please complete these steps:")
+    log("  1. Complete the Cloudflare Access authentication (Azure AD or email code)")
+    log("  2. Once on the Falabella site, log in with your test account")
+    log("     (e.g. clstgall001@yopmail.com / Test@123)")
+    log("  3. Wait until you see the Falabella homepage with 'Hola' greeting")
+    log("  4. Come back here and press ENTER to save the session")
+    log("")
 
-    # First go to home page to check if already logged in
+    page.goto(BASE_URL + "/falabella-cl", wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+
+    input(">>> Press ENTER here once you're logged in on the Falabella site... ")
+
+    # Save the auth state (Cloudflare + Falabella cookies)
+    context.storage_state(path=STATE_FILE)
+    log("")
+    log("  Session saved! You can now run orders without manual login:")
+    log("  python3 create_order.py 7144554")
+    log("  python3 create_order.py 7144554 --headed")
+    log("")
+    log("  The session will stay valid for a while. If you get auth errors")
+    log("  later, just run --login again to refresh it.")
+    return True
+
+
+def login(page, email, password):
+    """Check if already authenticated, handle Cloudflare Access + Falabella login."""
+    log("Step 1: Checking authentication...")
+
+    # Try to go to the Falabella site
     page.goto(BASE_URL + "/falabella-cl", wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
     time.sleep(3)
 
-    # Check for WAF block
-    if "bloqueado" in page.content().lower():
+    content = page.content()
+
+    # Check for Cloudflare Access gate
+    if "cloudflareaccess" in page.url or "cloudflareaccess" in content.lower():
         raise Exception(
-            "Access blocked by WAF. Make sure you're connected to the corporate VPN "
-            "and try running with --headed flag."
+            "Cloudflare Access authentication required!\n"
+            "Run this first to set up your session:\n"
+            "  python3 create_order.py --login\n"
+            "This opens a browser for you to manually authenticate once.\n"
+            "After that, automated runs will use the saved session."
         )
 
-    # Check if already logged in (look for account name / "Hola" greeting)
-    content = page.content()
+    # Check for WAF block
+    if "bloqueado" in content.lower():
+        raise Exception(
+            "Access blocked by WAF. Try:\n"
+            "  1. Connect to corporate VPN\n"
+            "  2. Run: python3 create_order.py --login"
+        )
+
+    # Check if already logged into Falabella
     if "Hola," in content and "Inicia sesión" not in content:
         log("  Already logged in!")
         return True
 
-    # Navigate to login page
+    # Past Cloudflare but not logged into Falabella - do automated Falabella login
+    log("  Cloudflare OK, logging into Falabella...")
     page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
     time.sleep(3)
 
-    # The login might be a KeyCloak form or Falabella's own form
-    # Try to find email input with various selectors
+    content = page.content()
+
+    # If Cloudflare gate appears on login page too, need --login
+    if "cloudflareaccess" in page.url or "cloudflareaccess" in content.lower():
+        raise Exception(
+            "Cloudflare Access authentication required!\n"
+            "Run: python3 create_order.py --login"
+        )
+
+    # Find and fill email
     email_selectors = [
         'input[type="email"]',
         'input[name="email"]',
@@ -143,7 +205,7 @@ def login(page, email, password):
         save_screenshot(page, "login_page_debug")
         raise Exception(
             "Could not find email input on login page. "
-            "Screenshot saved as login_page_debug.png for inspection."
+            "Screenshot saved as login_page_debug.png"
         )
 
     email_input.fill(email)
@@ -178,7 +240,7 @@ def login(page, email, password):
 
     if not pwd_input:
         save_screenshot(page, "password_page_debug")
-        raise Exception("Could not find password input")
+        raise Exception("Could not find password input. Check password_page_debug.png")
 
     pwd_input.fill(password)
     log("  Entered password")
@@ -205,22 +267,16 @@ def login(page, email, password):
         except Exception:
             continue
 
-    # Wait for navigation after login
     try:
         page.wait_for_load_state("networkidle", timeout=NAV_TIMEOUT)
     except PlaywrightTimeout:
         pass
     time.sleep(3)
 
-    # Verify login success
-    content = page.content()
-    if "bloqueado" in content.lower():
-        raise Exception("Access blocked after login attempt")
-
-    # Save auth state for future runs
+    # Save updated auth state
     try:
         page.context.storage_state(path=STATE_FILE)
-        log("  Auth state saved for future runs")
+        log("  Auth state saved")
     except Exception:
         pass
 
@@ -689,22 +745,16 @@ def get_order_number(page):
 
 def main():
     args = parse_args()
-    product_url = sku_to_url(args.sku_or_url)
     email = args.account
     password = args.password
 
-    log("=" * 55)
-    log("  Falabella FACL Staging - Order Creation Automation")
-    log("=" * 55)
-    log(f"Product: {product_url}")
-    log(f"Account: {email}")
-    log(f"Mode:    {'headed' if args.headed else 'headless'}")
-    log("")
-
     with sync_playwright() as p:
+        # For --login mode, always use headed
+        is_headed = args.headed or args.login
+
         # Launch browser with stealth settings
         browser = p.chromium.launch(
-            headless=not args.headed,
+            headless=not is_headed,
             slow_mo=args.slow,
             args=[
                 "--disable-blink-features=AutomationControlled",
@@ -724,8 +774,8 @@ def main():
             "timezone_id": "America/Santiago",
         }
 
-        # Restore saved auth state if available
-        if os.path.exists(STATE_FILE):
+        # Restore saved auth state if available (not for fresh --login)
+        if os.path.exists(STATE_FILE) and not args.login:
             context_options["storage_state"] = STATE_FILE
             log("Restoring saved auth state...")
 
@@ -739,6 +789,25 @@ def main():
 
         page = context.new_page()
         page.set_default_timeout(ACTION_TIMEOUT)
+
+        # --- LOGIN MODE ---
+        if args.login:
+            try:
+                interactive_login(context, page)
+                return None
+            finally:
+                browser.close()
+
+        # --- ORDER CREATION MODE ---
+        product_url = sku_to_url(args.sku_or_url)
+
+        log("=" * 55)
+        log("  Falabella FACL Staging - Order Creation Automation")
+        log("=" * 55)
+        log(f"Product: {product_url}")
+        log(f"Account: {email}")
+        log(f"Mode:    {'headed' if args.headed else 'headless'}")
+        log("")
 
         try:
             # Step 1: Login

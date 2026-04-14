@@ -138,15 +138,32 @@ def interactive_login(context, page):
     return True
 
 
+def safe_content(page, retries=3):
+    """Get page content, retrying if page is still navigating."""
+    for i in range(retries):
+        try:
+            return safe_content(page)
+        except Exception as e:
+            if "navigating" in str(e).lower() and i < retries - 1:
+                time.sleep(2)
+                continue
+            raise
+
+
 def login(page, email, password):
     """Check if already authenticated, handle Cloudflare Access + Falabella login."""
     log("Step 1: Checking authentication...")
 
     # Try to go to the Falabella site
     page.goto(BASE_URL + "/falabella-cl", wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
+    # Wait for any redirects (Cloudflare, SSO) to settle
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except PlaywrightTimeout:
+        pass
     time.sleep(3)
 
-    content = page.content()
+    content = safe_content(page)
 
     # Check for Cloudflare Access gate
     if "cloudflareaccess" in page.url or "cloudflareaccess" in content.lower():
@@ -176,7 +193,7 @@ def login(page, email, password):
     page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=NAV_TIMEOUT)
     time.sleep(3)
 
-    content = page.content()
+    content = safe_content(page)
 
     # If Cloudflare gate appears on login page too, need --login
     if "cloudflareaccess" in page.url or "cloudflareaccess" in content.lower():
@@ -326,7 +343,7 @@ def add_to_cart(page, product_url):
     time.sleep(4)
 
     # Check for product not found
-    content = page.content()
+    content = safe_content(page)
     if "404" in page.title() or "no encontramos" in content.lower() or "no existe" in content.lower():
         raise Exception(f"Product not found at {product_url}")
 
@@ -382,7 +399,7 @@ def checkout_from_cart(page):
     close_popups(page)
 
     # Check cart has items
-    content = page.content()
+    content = safe_content(page)
     if "vacío" in content.lower() or "empty" in content.lower():
         raise Exception("Cart is empty!")
 
@@ -705,7 +722,7 @@ def get_order_number(page):
     time.sleep(5)
 
     # Check current page for order confirmation
-    content = page.content()
+    content = safe_content(page)
 
     # Common order number patterns
     patterns = [
@@ -728,7 +745,7 @@ def get_order_number(page):
     time.sleep(5)
     close_popups(page)
 
-    content = page.content()
+    content = safe_content(page)
 
     # Look for the most recent order number
     for pattern in patterns:

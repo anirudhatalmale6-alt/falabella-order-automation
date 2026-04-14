@@ -760,21 +760,40 @@ def main():
         # --- CONNECT MODE: use existing Chrome session ---
         if args.connect:
             product_url = sku_to_url(args.sku_or_url)
-            cdp_url = f"http://localhost:{args.debug_port}"
-            log(f"Connecting to existing Chrome at {cdp_url}...")
+            port = args.debug_port
 
-            try:
-                browser = p.chromium.connect_over_cdp(cdp_url)
-            except Exception as e:
-                log(f"\nERROR: Could not connect to Chrome on port {args.debug_port}")
-                log(f"Details: {e}")
+            # Try both 127.0.0.1 (IPv4) and localhost - macOS often resolves localhost to IPv6
+            cdp_urls = [f"http://127.0.0.1:{port}", f"http://localhost:{port}"]
+            browser = None
+
+            for cdp_url in cdp_urls:
+                log(f"Trying to connect to Chrome at {cdp_url}...")
+                try:
+                    browser = p.chromium.connect_over_cdp(cdp_url)
+                    log(f"Connected via {cdp_url}")
+                    break
+                except Exception:
+                    continue
+
+            if browser is None:
+                log(f"\nERROR: Could not connect to Chrome on port {port}")
                 log("")
-                log("Make sure you:")
-                log("  1. Quit Chrome completely (Cmd+Q)")
-                log("  2. Relaunch with:")
-                log(f'     /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port={args.debug_port}')
-                log("  3. Log into staging.falabella.com in that Chrome window")
-                log("  4. Then run this script again with --connect")
+                log("Troubleshooting:")
+                log("")
+                log("  1. First, kill ALL Chrome processes:")
+                log("     pkill -f 'Google Chrome'")
+                log("")
+                log("  2. Wait 2 seconds, then relaunch Chrome with debugging:")
+                log(f"     /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port={port}")
+                log("")
+                log("  3. Verify debugging is working by opening this in that Chrome:")
+                log(f"     http://127.0.0.1:{port}/json")
+                log("     You should see a JSON response. If not, Chrome didn't start with debugging.")
+                log("")
+                log("  4. Log into staging.falabella.com in that Chrome")
+                log("")
+                log("  5. In a DIFFERENT terminal, run:")
+                log(f"     python3 create_order.py 7144554 --connect")
                 sys.exit(1)
 
             # Use the first existing context (your logged-in session)

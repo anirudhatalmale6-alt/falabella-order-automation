@@ -2,14 +2,17 @@
 """
 Falabella FACL Staging - Order Creation Automation
 
-First time setup:
-    python3 create_order.py --login          # Opens browser for manual Cloudflare + Falabella login
-                                              # Saves session for future automated runs
+Option A - Use your existing Chrome session (recommended):
+    1. Quit Chrome completely (Cmd+Q)
+    2. Relaunch Chrome with debugging enabled:
+       /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222
+    3. In that Chrome window, log into staging.falabella.com normally
+    4. Run the script:
+       python3 create_order.py 7144554 --connect
 
-Create orders:
+Option B - Playwright login + session save:
+    python3 create_order.py --login          # Opens browser for manual Cloudflare + Falabella login
     python3 create_order.py 7144554          # Headless (after login session saved)
-    python3 create_order.py 881333143 --headed
-    python3 create_order.py https://staging.falabella.com/falabella-cl/product/7144554/Samsung-Galaxy-Buds/7144554
 
 Note: Must run from a machine with access to staging.falabella.com (corporate VPN).
 """
@@ -47,6 +50,10 @@ def parse_args():
                         help="Product SKU (e.g. 7144554) or full product URL")
     parser.add_argument("--login", action="store_true",
                         help="Interactive login mode: opens browser for manual Cloudflare + Falabella auth, saves session")
+    parser.add_argument("--connect", action="store_true",
+                        help="Connect to your existing Chrome session (must launch Chrome with --remote-debugging-port=9222)")
+    parser.add_argument("--debug-port", type=int, default=9222,
+                        help="Chrome remote debugging port (default: 9222)")
     parser.add_argument("--headed", action="store_true",
                         help="Run with visible browser (recommended for first run)")
     parser.add_argument("--slow", type=int, default=0,
@@ -749,6 +756,83 @@ def main():
     password = args.password
 
     with sync_playwright() as p:
+
+        # --- CONNECT MODE: use existing Chrome session ---
+        if args.connect:
+            product_url = sku_to_url(args.sku_or_url)
+            cdp_url = f"http://localhost:{args.debug_port}"
+            log(f"Connecting to existing Chrome at {cdp_url}...")
+
+            try:
+                browser = p.chromium.connect_over_cdp(cdp_url)
+            except Exception as e:
+                log(f"\nERROR: Could not connect to Chrome on port {args.debug_port}")
+                log(f"Details: {e}")
+                log("")
+                log("Make sure you:")
+                log("  1. Quit Chrome completely (Cmd+Q)")
+                log("  2. Relaunch with:")
+                log(f'     /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port={args.debug_port}')
+                log("  3. Log into staging.falabella.com in that Chrome window")
+                log("  4. Then run this script again with --connect")
+                sys.exit(1)
+
+            # Use the first existing context (your logged-in session)
+            contexts = browser.contexts
+            if not contexts:
+                log("ERROR: No browser contexts found. Open a tab in Chrome first.")
+                sys.exit(1)
+
+            context = contexts[0]
+            # Open a new tab in the existing session
+            page = context.new_page()
+            page.set_default_timeout(ACTION_TIMEOUT)
+
+            log(f"Connected! Using your existing Chrome session.")
+            log("")
+            log("=" * 55)
+            log("  Falabella FACL Staging - Order Creation (Connect Mode)")
+            log("=" * 55)
+            log(f"Product: {product_url}")
+            log(f"Account: {email} (using existing session)")
+            log("")
+
+            try:
+                # Check if already authenticated
+                login(page, email, password)
+
+                if args.clear_cart:
+                    clear_cart(page)
+
+                add_to_cart(page, product_url)
+                checkout_from_cart(page)
+                handle_delivery(page)
+                handle_payment(page)
+                order_number = get_order_number(page)
+
+                log("")
+                log("=" * 55)
+                if order_number:
+                    log(f"  ORDER CREATED SUCCESSFULLY!")
+                    log(f"  Order Number: {order_number}")
+                else:
+                    log(f"  Order may have been created but number not extracted.")
+                    log(f"  Check orders at: {ORDERS_URL}")
+                log("=" * 55)
+
+                save_screenshot(page, "final_result")
+                return order_number
+
+            except Exception as e:
+                log(f"\nERROR: {e}")
+                save_screenshot(page, "error_screenshot")
+                log("Check error_screenshot.png for details.")
+                sys.exit(1)
+
+            finally:
+                page.close()  # Close only the tab we opened, not the browser
+
+        # --- STANDARD MODE: launch new browser ---
         # For --login mode, always use headed
         is_headed = args.headed or args.login
 
